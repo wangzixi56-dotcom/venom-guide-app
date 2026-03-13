@@ -1,0 +1,924 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Activity, 
+  Clock, 
+  MapPin, 
+  ShieldAlert, 
+  Navigation, 
+  ChevronRight, 
+  Heart, 
+  Droplets, 
+  Maximize, 
+  Volume2, 
+  Info,
+  ArrowRight,
+  Hospital,
+  AlertTriangle,
+  CheckCircle2,
+  Scan
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import L from 'leaflet';
+
+// Fix for default marker icon
+delete (L.Icon.Default.prototype as any)._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
+  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+});
+
+// --- Types & Constants ---
+
+type RiskLevel = 'HIGH' | 'MEDIUM' | 'LOW';
+
+interface VitalData {
+  heartRate: number;
+  spo2: number;
+  swelling: number; // in mm or relative units
+  timestamp: number;
+}
+
+interface SnakeInfo {
+  id: string;
+  name: string;
+  image: string;
+  location: string;
+  probability: number;
+}
+
+interface HospitalInfo {
+  id: string;
+  name: string;
+  distance: string;
+  serumStatus: 'AVAILABLE' | 'LOW' | 'OUT_OF_STOCK';
+  address: string;
+  time?: string;
+  coords: [number, number];
+}
+
+const COLORS = {
+  pink: '#FF96F6',
+  green: '#83FF89',
+  dark: '#1A1A1A',
+  white: '#FFFFFF',
+};
+
+// --- Mock Data ---
+
+const RISK_GUIDANCE = {
+  HIGH: {
+    title: "极高风险：生命威胁",
+    color: "text-red-500",
+    bg: "bg-red-500/10",
+    border: "border-red-500/20",
+    gradient: "from-red-500 to-red-500/40",
+    icon: ShieldAlert,
+    summary: "检测到剧毒蛇咬伤特征，生理指标异常。必须立即采取行动。",
+    actions: [
+      "立即拨打 120 急救电话，告知蛇咬伤情况",
+      "保持绝对静止，将伤肢置于心脏水平以下",
+      "记录咬伤时间，不要尝试切开或吸吮毒液",
+      "前往备有抗蛇毒血清的定点医院"
+    ],
+    snakes: [
+      { name: "银环蛇", probability: 65, image: "https://images.unsplash.com/photo-1629190844820-0774658066a7?w=400&h=400&fit=crop" },
+      { name: "金环蛇", probability: 35, image: "https://images.unsplash.com/photo-1531386151447-fd76ad50012f?w=400&h=400&fit=crop" }
+    ]
+  },
+  MEDIUM: {
+    title: "中度风险：需严密观察",
+    color: "text-orange-500",
+    bg: "bg-orange-500/10",
+    border: "border-orange-500/20",
+    gradient: "from-orange-500 to-orange-500/40",
+    icon: AlertTriangle,
+    summary: "疑似毒蛇咬伤，局部症状明显。请密切监测全身反应。",
+    actions: [
+      "清洗伤口，去除残留毒液",
+      "取下戒指、手表等束缚物，防止肿胀压迫",
+      "拍摄蛇的照片或记住特征以供医生识别",
+      "联系最近的医疗机构进行评估"
+    ],
+    snakes: [
+      { name: "竹叶青", probability: 70, image: "https://images.unsplash.com/photo-1528183429752-a97d0bf99b5a?w=400&h=400&fit=crop" },
+      { name: "烙铁头 (原矛头蝮)", probability: 30, image: "https://images.unsplash.com/photo-1574068468668-a05a11f871da?w=400&h=400&fit=crop" }
+    ]
+  },
+  LOW: {
+    title: "低风险：常规处理",
+    color: "text-[#83FF89]",
+    bg: "bg-[#83FF89]/10",
+    border: "border-[#83FF89]/20",
+    gradient: "from-[#83FF89] to-[#83FF89]/40",
+    icon: Info,
+    summary: "目前生理指标平稳，疑似为非毒蛇或常见节肢动物咬伤。建议观察。",
+    actions: [
+      "使用肥皂水彻底清洗伤口",
+      "局部冷敷以缓解疼痛（仅限非出血性咬伤）",
+      "继续监测心率和呼吸，如感不适立即就医",
+      "保持心态平稳，避免剧烈运动"
+    ],
+    
+    snakes: [
+      { name: "蜂类", probability: 40, image: "https://images.unsplash.com/photo-1559181567-c3190ca9959b?w=400&h=400&fit=crop" },
+      { name: "蜈蚣", probability: 30, image: "https://images.unsplash.com/photo-1626548307930-deac221f77b9?w=400&h=400&fit=crop" },
+      { name: "蜘蛛", probability: 20, image: "https://images.unsplash.com/photo-1533038590840-1cde6b66b721?w=400&h=400&fit=crop" },
+      { name: "蜱虫", probability: 10, image: "https://images.unsplash.com/photo-1599032909756-5dee8c65f070?w=400&h=400&fit=crop" }
+    ]
+  }
+};
+
+const MOCK_SNAKES: SnakeInfo[] = [
+  { id: '1', name: '眼镜蛇 (Cobra)', image: 'https://images.unsplash.com/photo-1531386151447-fd76ad50012f?w=400&h=400&fit=crop', location: '华南、西南林区', probability: 85 },
+  { id: '2', name: '银环蛇 (Bungarus)', image: 'https://images.unsplash.com/photo-1629190844820-0774658066a7?w=400&h=400&fit=crop', location: '南方丘陵地带', probability: 12 },
+  { id: '3', name: '五步蛇 (Deinagkistrodon)', image: 'https://images.unsplash.com/photo-1574068468668-a05a11f871da?w=400&h=400&fit=crop', location: '山区溪流附近', probability: 3 },
+];
+
+const MOCK_HOSPITALS: HospitalInfo[] = [
+  { id: 'h1', name: '华西医院急救中心', distance: '3.2 KM', serumStatus: 'AVAILABLE', address: '成都市武侯区国学巷37号', time: '10 MIN', coords: [30.6418, 104.0622] },
+  { id: 'h2', name: '四川省人民医院', distance: '5.8 KM', serumStatus: 'AVAILABLE', address: '成都市一环路西二段32号', time: '17 MIN', coords: [30.6625, 104.0388] },
+  { id: 'h3', name: '成都市第三人民医院', distance: '8.5 KM', serumStatus: 'AVAILABLE', address: '成都市青羊区青龙街82号', time: '26 MIN', coords: [30.6710, 104.0650] },
+  { id: 'h4', name: '成都市第二人民医院', distance: '10.2 KM', serumStatus: 'LOW', address: '成都市锦江区庆东街10号', time: '32 MIN', coords: [30.6580, 104.0810] },
+  { id: 'h5', name: '西部战区总医院', distance: '14.5 KM', serumStatus: 'AVAILABLE', address: '成都市金牛区蓉都大道270号', time: '45 MIN', coords: [30.7350, 104.1050] },
+];
+
+// --- Components ---
+
+const BottomNav = ({ currentView, setView }: { currentView: string, setView: (v: any) => void }) => {
+  const navItems = [
+    { id: 'MAIN', label: '急救', icon: Activity },
+    { id: 'REPORT', label: '评估', icon: ShieldAlert },
+    { id: 'HOSPITALS', label: '血清', icon: Hospital },
+    { id: 'GUIDE', label: '指引', icon: CheckCircle2 },
+  ];
+
+  return (
+    <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-gradient-to-t from-black via-black/80 to-transparent px-6 pb-4 pt-12 flex justify-between items-center z-50">
+      {navItems.map((item) => {
+        const Icon = item.icon;
+        const isActive = currentView === item.id;
+        return (
+          <button
+            key={item.id}
+            onClick={() => setView(item.id)}
+            className="flex flex-col items-center gap-1 transition-all duration-300"
+          >
+            <div className={`p-2 rounded-xl transition-all duration-300 ${isActive ? 'text-white scale-110' : 'text-white/40'}`}>
+              <Icon className="w-6 h-6" />
+            </div>
+            <span className={`text-[10px] font-bold tracking-wider ${isActive ? 'text-white' : 'text-white/20'}`}>
+              {item.label}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+};
+
+const RiskSwitcher = ({ currentRisk, setRisk }: { currentRisk: RiskLevel, setRisk: (r: RiskLevel) => void }) => {
+  return (
+    <div className="px-6 mb-4">
+      <div className="bg-white/5 p-1 rounded-xl flex gap-1 border border-white/10 relative">
+        {(['LOW', 'MEDIUM', 'HIGH'] as RiskLevel[]).map((r) => (
+          <button
+            key={r}
+            onClick={() => setRisk(r)}
+            className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold transition-all z-10 ${
+              currentRisk === r 
+                ? (r === 'HIGH' ? 'bg-red-500 text-white' : r === 'MEDIUM' ? 'bg-orange-500 text-white' : 'bg-green-500 text-white')
+                : 'text-white/40 hover:text-white/60'
+            }`}
+          >
+            {r}
+          </button>
+        ))}
+      </div>
+      <div className="flex justify-between mt-1 px-1">
+        <span className="text-[8px] text-white/30 uppercase tracking-widest">预览模式切换</span>
+      </div>
+    </div>
+  );
+};
+
+const Timer = ({ startTime }: { startTime: number }) => {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setNow(Date.now());
+    }, 100); // 使用更短的间隔确保秒数切换精准，不跳秒
+    return () => clearInterval(interval);
+  }, []);
+
+  const formatTime = (currentNow: number) => {
+    const elapsedMs = Math.max(0, currentNow - startTime);
+    
+    const totalSeconds = Math.floor(elapsedMs / 1000);
+    const h = Math.floor(totalSeconds / 3600).toString().padStart(2, '0');
+    const m = Math.floor((totalSeconds % 3600) / 60).toString().padStart(2, '0');
+    const s = (totalSeconds % 60).toString().padStart(2, '0');
+    return `${h}:${m}:${s}`;
+  };
+
+  return (
+    <div className="flex items-center gap-2 bg-black/40 backdrop-blur-md px-4 py-2 rounded-full border border-white/20">
+      <Clock className="w-4 h-4 text-white" />
+      <motion.span 
+        animate={{ opacity: [0.7, 1, 0.7] }}
+        transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+        className="font-mono text-xl font-bold tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-red-500 to-yellow-500"
+      >
+        {formatTime(now)}
+      </motion.span>
+    </div>
+  );
+};
+
+const VitalCard = ({ icon: Icon, label, value, unit, status, statusText }: any) => {
+  const statusColor = status === 'RED' ? 'text-red-400' : status === 'YELLOW' ? 'text-yellow-400' : 'text-green-400';
+  const statusBg = status === 'RED' ? 'bg-red-500/20' : status === 'YELLOW' ? 'bg-yellow-500/20' : 'bg-green-500/20';
+  
+  return (
+    <div className="bg-white/10 backdrop-blur-sm p-4 rounded-2xl border border-white/10 flex flex-col gap-1 relative overflow-hidden">
+      {/* Status Indicator Bar */}
+      <div className={`absolute top-0 left-0 w-1 h-full ${status === 'RED' ? 'bg-red-500' : status === 'YELLOW' ? 'bg-yellow-500' : 'bg-green-500'}`} />
+      
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-white/60 text-[10px] uppercase tracking-widest">
+          <Icon className="w-3 h-3" />
+          {label}
+        </div>
+      </div>
+      
+      <div className="flex items-baseline gap-1 mt-1">
+        <span className="text-2xl font-bold text-white">{value}</span>
+        {unit && <span className="text-xs text-white/40">{unit}</span>}
+      </div>
+      
+      <div className={`text-[10px] font-medium ${statusColor}`}>
+        {statusText}
+      </div>
+    </div>
+  );
+};
+
+const RiskSpectrum = ({ currentRisk }: { currentRisk: RiskLevel }) => {
+  return (
+    <div className="px-6 mb-6">
+      <div className="flex justify-between items-center mb-2">
+        <span className="text-[10px] text-white/40 uppercase tracking-widest font-bold">Risk Spectrum</span>
+        <span className="text-[10px] text-white/60 font-mono">Real-time Analysis</span>
+      </div>
+      <div className="h-3 w-full bg-white/5 rounded-full flex overflow-hidden border border-white/10 p-0.5">
+        <div className={`h-full flex-1 rounded-l-full transition-all duration-500 ${currentRisk === 'LOW' ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]' : 'bg-green-500/20'}`} />
+        <div className={`h-full flex-1 transition-all duration-500 ${currentRisk === 'MEDIUM' ? 'bg-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.5)]' : 'bg-yellow-500/20'}`} />
+        <div className={`h-full flex-1 rounded-r-full transition-all duration-500 ${currentRisk === 'HIGH' ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]' : 'bg-red-500/20'}`} />
+      </div>
+      <div className="flex justify-between mt-2 px-1">
+        <div className="flex items-center gap-1">
+          <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+          <span className="text-[8px] text-white/40 uppercase">Safe</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <div className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
+          <span className="text-[8px] text-white/40 uppercase">Warning</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
+          <span className="text-[8px] text-white/40 uppercase">Danger</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- Main App ---
+
+export default function App() {
+  const [view, setView] = useState<'SCAN' | 'MAIN' | 'REPORT' | 'HOSPITALS' | 'GUIDE'>('SCAN');
+  // 对抗 AI Studio 回弹补丁
+  useEffect(() => {
+    // 强制把外部容器的滚动条锁死在顶部，不让它感知滑动
+    const stopGlobalScroll = () => {
+      if (window.scrollY !== 0) {
+          window.scrollTo(0, 0);
+      }
+    };
+    window.addEventListener('scroll', stopGlobalScroll);
+    return () => window.removeEventListener('scroll', stopGlobalScroll);
+  }, []);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [vitals, setVitals] = useState<VitalData>({ heartRate: 72, spo2: 98, swelling: 0, timestamp: Date.now() });
+  const [risk, setRisk] = useState<RiskLevel>('LOW');
+  const [completedSteps, setCompletedSteps] = useState<number[]>([]);
+  const [swellingHistory, setSwellingHistory] = useState<number[]>([]);
+  const [showHighRiskModal, setShowHighRiskModal] = useState(false);
+  
+  // Manual switch resets vitals
+  const handleManualRiskSwitch = (r: RiskLevel) => {
+    setRisk(r);
+    if (r === 'HIGH' && view === 'MAIN') {
+      setShowHighRiskModal(true);
+    }
+    setVitals(v => {
+      if (r === 'HIGH') return { ...v, heartRate: 115, swelling: 6.2 };
+      if (r === 'MEDIUM') return { ...v, heartRate: 95, swelling: 3.1 };
+      return { ...v, heartRate: 72, swelling: 0.5 };
+    });
+  };
+
+  // Simulation refs
+  const simulationInterval = useRef<any>(null);
+
+  // Data Black Box Simulation
+  const saveToBlackBox = (data: any) => {
+    const blackBox = JSON.parse(localStorage.getItem('venomguide_blackbox') || '[]');
+    blackBox.push({ ...data, timestamp: Date.now() });
+    // Keep last 1000 records
+    localStorage.setItem('venomguide_blackbox', JSON.stringify(blackBox.slice(-1000)));
+  };
+
+  // Handle NFC Scan
+  const handleScan = () => {
+    setStartTime(Date.now());
+    setView('MAIN');
+    // Start simulation
+    simulationInterval.current = setInterval(() => {
+      setVitals(prev => {
+        const newHR = prev.heartRate + (Math.random() > 0.5 ? 1 : -1);
+        const newSwelling = prev.swelling + (Math.random() * 0.2); // Swelling increases
+        
+        // Swelling Slope Algorithm Simulation
+        setSwellingHistory(h => {
+          const newHistory = [...h, newSwelling].slice(-10);
+          // Simulation risk logic disabled to prioritize 36s preview auto-rotation
+          /*
+          if (newHistory.length >= 2) {
+            const slope = (newHistory[newHistory.length - 1] - newHistory[0]) / newHistory.length;
+            if (slope > 0.15) setRisk('HIGH');
+            else if (slope > 0.05) setRisk('MEDIUM');
+            else setRisk('LOW');
+          }
+          */
+          return newHistory;
+        });
+
+        const newData = { heartRate: newHR, spo2: 98, swelling: newSwelling, timestamp: Date.now() };
+        saveToBlackBox(newData);
+        return newData;
+      });
+    }, 2000);
+  };
+
+  // Vibration & TTS Broadcast for High Risk
+  useEffect(() => {
+    let vibrationInterval: any;
+    
+    if (view === 'MAIN' && showHighRiskModal) {
+      // 1. Real Vibration (Looping while modal is active)
+      if ('vibrate' in navigator) {
+        navigator.vibrate([500, 200, 500]);
+        vibrationInterval = setInterval(() => {
+          navigator.vibrate([500, 200, 500]);
+        }, 1500);
+      }
+      
+      // 2. Voice Broadcast (TTS)
+      const message = "监测到伤口肿胀速度加快，请保持静止并再次确认近心端未被过紧束缚。";
+      const speech = new SpeechSynthesisUtterance(message);
+      speech.lang = 'zh-CN';
+      speech.rate = 1.0;
+      window.speechSynthesis.cancel(); // Stop any ongoing speech
+      window.speechSynthesis.speak(speech);
+      
+      console.log('ALERT: High Risk Actions Triggered (Vibration + TTS)');
+    } else {
+      if (vibrationInterval) clearInterval(vibrationInterval);
+      if ('vibrate' in navigator) navigator.vibrate(0);
+      window.speechSynthesis.cancel();
+    }
+
+    return () => {
+      if (vibrationInterval) clearInterval(vibrationInterval);
+      if ('vibrate' in navigator) navigator.vibrate(0);
+    };
+  }, [showHighRiskModal, view]);
+
+  // Cleanup
+  useEffect(() => {
+    return () => {
+      if (simulationInterval.current) clearInterval(simulationInterval.current);
+    };
+  }, []);
+
+  // --- Views ---
+
+  const ScanView = () => (
+    <div className="h-screen bg-[#1A1A1A] flex flex-col items-center justify-center p-8 text-center">
+      <motion.div 
+        initial={{ scale: 0.8, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className="relative mb-12"
+      >
+        <div className="w-48 h-48 rounded-full border-4 border-[#83FF89]/20 flex items-center justify-center">
+          <motion.div 
+            animate={{ scale: [1, 1.1, 1] }}
+            transition={{ repeat: Infinity, duration: 2 }}
+            className="w-32 h-32 rounded-full bg-gradient-to-br from-[#FF96F6] to-[#83FF89] flex items-center justify-center shadow-[0_0_50px_rgba(131,255,137,0.3)]"
+          >
+            <svg width="90" height="90" viewBox="0 0 100 100" fill="black">
+              {/* Tongue */}
+              <path d="M32 30 L22 30 M22 30 L15 23 M22 30 L15 37" stroke="black" strokeWidth="5" strokeLinecap="round" />
+              {/* Head */}
+              <ellipse cx="55" cy="30" rx="20" ry="18" />
+              <circle cx="62" cy="25" r="5" fill="white" />
+              {/* Neck */}
+              <rect x="60" y="40" width="15" height="25" />
+              {/* Coils */}
+              <rect x="45" y="60" width="45" height="16" rx="8" />
+              <rect x="35" y="76" width="65" height="16" rx="8" />
+            </svg>
+          </motion.div>
+        </div>
+        {/* Dynamic Scan Rings */}
+        {[1, 2, 3].map(i => (
+          <motion.div
+            key={i}
+            className="absolute inset-0 rounded-full border border-[#83FF89]/40"
+            animate={{ scale: [1, 2], opacity: [0.5, 0] }}
+            transition={{ repeat: Infinity, duration: 3, delay: i * 1 }}
+          />
+        ))}
+      </motion.div>
+      
+      <h1 className="text-3xl font-bold text-white mb-4 tracking-tight">VenomGuide</h1>
+      <p className="text-white/60 mb-8 max-w-xs leading-relaxed">
+        请按说明佩戴Venom模块后,点击激活疑似蛇咬伤风险管理流程。
+      </p>
+      
+      <button 
+        onClick={handleScan}
+        className="px-8 py-4 bg-white text-black rounded-full font-bold flex items-center gap-2 hover:bg-[#83FF89] transition-colors"
+      >
+        激活系统 <ArrowRight className="w-4 h-4" />
+      </button>
+    </div>
+  );
+
+  const MainView = () => {
+    // Status Logic - Aligned with overall risk level as requested
+    const getHRStatus = () => {
+      if (risk === 'HIGH') return { status: 'RED', text: '心率过快 (Tachycardia)' };
+      if (risk === 'MEDIUM') return { status: 'YELLOW', text: '心率偏高 (Elevated)' };
+      return { status: 'GREEN', text: '指标正常 (Normal)' };
+    };
+
+    const getSpO2Status = () => {
+      if (risk === 'HIGH') return { status: 'RED', text: '血氧不足 (Hypoxia)' };
+      if (risk === 'MEDIUM') return { status: 'YELLOW', text: '血氧偏低 (Low)' };
+      return { status: 'GREEN', text: '指标正常 (Normal)' };
+    };
+
+    const getSwellingStatus = () => {
+      if (risk === 'HIGH') return { status: 'RED', text: '严重肿胀 (Severe Edema)' };
+      if (risk === 'MEDIUM') return { status: 'YELLOW', text: '中度肿胀 (Moderate Edema)' };
+      return { status: 'GREEN', text: '轻微肿胀 (Mild Edema)' };
+    };
+
+    const getWoundStatus = () => {
+      if (risk === 'HIGH') return { status: 'RED', value: '暗紫色', text: '组织坏死 (Necrosis)' };
+      if (risk === 'MEDIUM') return { status: 'YELLOW', value: '紫红色', text: '皮下瘀斑 (Ecchymosis)' };
+      return { status: 'GREEN', value: '淡红色', text: '局部红斑 (Erythema)' };
+    };
+
+    const hr = getHRStatus();
+    const spo2 = getSpO2Status();
+    const swell = getSwellingStatus();
+    const wound = getWoundStatus();
+
+    return (
+      <div className={`h-screen flex flex-col transition-colors duration-500 relative overflow-y-auto ${
+        risk === 'HIGH' ? 'bg-red-950' : risk === 'MEDIUM' ? 'bg-orange-950' : 'bg-[#1A1A1A]'
+      }`}>
+        {/* High Risk Overlay (Static) */}
+        <AnimatePresence>
+          {risk === 'HIGH' && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 0.4 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 z-0 pointer-events-none bg-[radial-gradient(circle_at_center,transparent_0%,rgba(239,68,68,0.4)_100%)]"
+            />
+          )}
+        </AnimatePresence>
+
+        {/* Content Container (Ensure it stays above overlay) */}
+        <div className="relative z-10 flex flex-col h-full">
+          {/* Header with Timer */}
+          <div className="p-6 pt-12 flex justify-between items-start shrink-0">
+            <div className="flex flex-col gap-1">
+              <span className="text-white/40 text-[10px] uppercase tracking-[0.2em] font-bold">Golden Hour Timer</span>
+              {startTime && <Timer startTime={startTime} />}
+            </div>
+            <div className="flex flex-col items-end gap-2">
+              <div className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest ${
+                risk === 'HIGH' ? 'bg-red-500 text-white' : risk === 'MEDIUM' ? 'bg-orange-500 text-white' : 'bg-[#83FF89] text-black'
+              }`}>
+                Risk: {risk}
+              </div>
+              <button className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-white">
+                <Volume2 className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Scrollable Content Area */}
+          <div className="flex-1 overflow-y-auto pb-32">
+            {/* Risk Spectrum */}
+            <RiskSpectrum currentRisk={risk} />
+
+            {/* Risk Switcher (Preview Mode) */}
+            <RiskSwitcher currentRisk={risk} setRisk={handleManualRiskSwitch} />
+
+            {/* Vitals Grid */}
+            <div className="px-6 grid grid-cols-2 gap-4 mb-6">
+              <VitalCard 
+                icon={Heart} 
+                label="Heart Rate" 
+                value={vitals.heartRate} 
+                unit="BPM" 
+                status={hr.status} 
+                statusText={hr.text} 
+              />
+              <VitalCard 
+                icon={Droplets} 
+                label="SpO2" 
+                value={vitals.spo2} 
+                unit="%" 
+                status={spo2.status} 
+                statusText={spo2.text} 
+              />
+              <VitalCard 
+                icon={Maximize} 
+                label="Local Swelling" 
+                value={vitals.swelling.toFixed(2)} 
+                unit="MM" 
+                status={swell.status} 
+                statusText={swell.text} 
+              />
+              <VitalCard 
+                icon={Activity} 
+                label="Wound Color" 
+                value={wound.value} 
+                status={wound.status} 
+                statusText={wound.text} 
+              />
+            </div>
+
+            {/* Alert Banner */}
+            {risk === 'HIGH' && (
+              <div className="mx-6 p-4 bg-red-500 rounded-2xl flex items-center gap-4 mb-6">
+                <div className="w-12 h-12 rounded-full bg-white/20 flex items-center justify-center shrink-0">
+                  <ShieldAlert className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <p className="text-white font-bold text-sm">检测到局部肿胀加速</p>
+                  <p className="text-white/80 text-xs">请保持静止，避免毒素随血液循环加速</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+  </div>
+);
+};
+
+  const ReportView = () => {
+    const guidance = RISK_GUIDANCE[risk];
+    const GuidanceIcon = guidance.icon;
+
+    return (
+      <div className="h-screen bg-[#1A1A1A] flex flex-col">
+        <div className="p-6 pt-12 flex items-center gap-4 shrink-0">
+          <button onClick={() => setView('MAIN')} className="text-white/60"><ChevronRight className="w-6 h-6 rotate-180" /></button>
+          <h2 className="text-xl font-bold text-white">风险评估报告</h2>
+        </div>
+
+        <div className="flex-1 overflow-y-auto pb-32">
+          {/* Risk Switcher (Preview Mode) */}
+          <div className="mb-4">
+            <RiskSwitcher currentRisk={risk} setRisk={handleManualRiskSwitch} />
+          </div>
+
+          <div className="px-6 space-y-6">
+            {/* Risk Summary Card */}
+            <div className={`p-5 rounded-2xl border ${guidance.bg} ${guidance.border}`}>
+              <div className="flex items-center gap-3 mb-3">
+                <div className={`w-10 h-10 rounded-full flex items-center justify-center ${guidance.bg}`}>
+                  <GuidanceIcon className={`w-6 h-6 ${guidance.color}`} />
+                </div>
+                <div>
+                  <h3 className={`font-bold ${guidance.color}`}>{guidance.title}</h3>
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest">Assessment Result</p>
+                </div>
+              </div>
+              <p className="text-white/80 text-sm leading-relaxed">
+                {guidance.summary}
+              </p>
+            </div>
+
+            {/* Action Guidance */}
+            <div className="space-y-3">
+              <h4 className="text-white/60 text-[10px] uppercase tracking-widest font-bold px-1">立即采取的行动</h4>
+              {guidance.actions.map((action, idx) => (
+                <div key={idx} className="flex gap-3 p-4 bg-white/5 rounded-xl border border-white/10">
+                  <span className={`${guidance.color} font-mono text-xs font-bold`}>{String(idx + 1).padStart(2, '0')}</span>
+                  <p className="text-white/80 text-xs leading-relaxed">{action}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Location Info */}
+            <div className="p-4 bg-white/5 rounded-2xl border border-white/10">
+              <div className={`flex items-center gap-2 ${guidance.color} mb-2`}>
+                <MapPin className="w-4 h-4" />
+                <span className="text-xs font-bold uppercase tracking-widest">当前位置: 四川省成都市</span>
+              </div>
+              <p className="text-white/80 text-sm leading-relaxed">
+                根据上传的被咬伤地区，检测到了以下几种常见毒蛇活动：
+              </p>
+            </div>
+
+            {/* Snake List */}
+            <div className="space-y-3">
+              <h4 className="text-white/60 text-[10px] uppercase tracking-widest font-bold px-1">该地区蛇种分布概率</h4>
+              {guidance.snakes.map((snake, idx) => (
+                <div key={idx} className="bg-white/5 rounded-2xl p-4 border border-white/10 flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-full overflow-hidden border-2 border-white/10 flex-shrink-0">
+                    <img src={snake.image} alt={snake.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex justify-between items-center mb-1.5">
+                      <h3 className="text-white text-sm font-bold">{snake.name}</h3>
+                      <span className={`${guidance.color} font-mono text-xs font-bold`}>{snake.probability}%</span>
+                    </div>
+                    <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
+                      <motion.div 
+                        initial={{ width: 0 }}
+                        animate={{ width: `${snake.probability}%` }}
+                        className={`h-full bg-gradient-to-r ${guidance.gradient}`}
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const HospitalView = () => {
+    const userLocation: [number, number] = [30.6586, 104.0648]; // Chengdu Center
+    
+    // Custom icon for user
+    const userIcon = L.divIcon({
+      className: 'custom-user-icon',
+      html: `<div class="w-8 h-8 rounded-full bg-[#83FF89]/30 flex items-center justify-center border border-[#83FF89]/50 relative">
+               <div class="w-12 h-12 rounded-full bg-[#83FF89]/20 animate-ping absolute -inset-2"></div>
+               <div class="w-3 h-3 rounded-full bg-[#83FF89] shadow-[0_0_10px_#83FF89]"></div>
+             </div>`,
+      iconSize: [32, 32],
+      iconAnchor: [16, 16],
+    });
+
+    // Custom icon for hospitals
+    const hospitalIcon = L.divIcon({
+      className: 'custom-hospital-icon',
+      html: `<div class="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center border border-white/30 backdrop-blur-sm">
+               <div class="w-2 h-2 rounded-full bg-white"></div>
+             </div>`,
+      iconSize: [24, 24],
+      iconAnchor: [12, 12],
+    });
+
+    return (
+      <div className="h-screen bg-[#1A1A1A] flex flex-col">
+        <div className="p-6 pt-12 flex items-center gap-4 shrink-0">
+          <button onClick={() => setView('REPORT')} className="text-white/60"><ChevronRight className="w-6 h-6 rotate-180" /></button>
+          <h2 className="text-xl font-bold text-white">血清医院导航</h2>
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          {/* Interactive Map */}
+          <div className="w-full h-64 bg-white/5 relative overflow-hidden shrink-0 border-y border-white/10">
+            <MapContainer 
+              center={userLocation} 
+              zoom={12} 
+              scrollWheelZoom={true}
+              style={{ height: '100%', width: '100%', background: '#1A1A1A' }}
+              zoomControl={false}
+            >
+              <TileLayer
+                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+                url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+              />
+              
+              {/* User Marker */}
+              <Marker position={userLocation} icon={userIcon}>
+                <Popup className="custom-popup">
+                  <div className="text-xs font-bold">您的当前位置</div>
+                </Popup>
+              </Marker>
+
+              {/* Hospital Markers */}
+              {MOCK_HOSPITALS.map(h => (
+                <Marker key={h.id} position={h.coords} icon={hospitalIcon}>
+                  <Popup className="custom-popup">
+                    <div className="p-1">
+                      <div className="text-xs font-bold text-black">{h.name}</div>
+                      <div className="text-[10px] text-gray-600">{h.address}</div>
+                      <div className="text-[10px] font-bold text-green-600 mt-1">{h.serumStatus === 'AVAILABLE' ? '血清充足' : '血清少量'}</div>
+                    </div>
+                  </Popup>
+                </Marker>
+              ))}
+            </MapContainer>
+
+            {/* Map Overlay Info */}
+            <div className="absolute bottom-4 left-4 right-4 bg-black/60 backdrop-blur-md p-3 rounded-xl text-[10px] text-white/60 flex items-center gap-3 border border-white/10 z-[1000] pointer-events-none">
+              <div className="w-6 h-6 rounded-full bg-[#83FF89]/20 flex items-center justify-center">
+                <Info className="w-3 h-3 text-[#83FF89]" />
+              </div>
+              <p className="leading-tight">
+                <span className="text-white font-bold">交互式四川地图</span><br />
+                您可以手动缩放、拖拽查看周边医院分布及实时血清状态
+              </p>
+            </div>
+            
+            {/* Zoom Hint */}
+            <div className="absolute top-4 right-4 bg-black/40 backdrop-blur-md px-2 py-1 rounded text-[8px] text-white/40 uppercase tracking-widest z-[1000]">
+              可手动缩放
+            </div>
+          </div>
+
+          <div className="p-4 space-y-3 pb-32">
+            {MOCK_HOSPITALS.map(h => (
+              <div key={h.id} className="p-4 bg-white/5 rounded-2xl border border-white/10 flex flex-col gap-4 relative overflow-hidden">
+                {/* Serum Status Badge */}
+                <div className={`absolute top-0 right-0 px-3 py-1 rounded-bl-xl text-[9px] font-bold uppercase tracking-widest ${
+                  h.serumStatus === 'AVAILABLE' ? 'bg-green-500/20 text-green-400' : 'bg-orange-500/20 text-orange-400'
+                }`}>
+                  {h.serumStatus === 'AVAILABLE' ? '血清充足' : '血清少量'}
+                </div>
+
+                <div className="space-y-1">
+                  <h3 className="text-white font-bold text-lg tracking-tight pr-16">{h.name}</h3>
+                  <div className="flex items-center gap-2 text-white/40">
+                    <MapPin className="w-3 h-3" />
+                    <span className="text-xs">{h.address}</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-8">
+                  <div className="space-y-0.5">
+                    <p className="text-white/40 text-[9px] uppercase tracking-widest font-bold">距离</p>
+                    <p className="text-[#58C7FF] text-lg font-mono font-bold">{h.distance}</p>
+                  </div>
+                  
+                  <div className="w-px h-6 bg-white/10" />
+
+                  <div className="space-y-0.5">
+                    <p className="text-white/40 text-[9px] uppercase tracking-widest font-bold">预估耗时</p>
+                    <p className="text-white text-lg font-mono font-bold">{h.time}</p>
+                  </div>
+
+                  <div className="ml-auto">
+                    <button className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-white border border-white/10">
+                      <Navigation className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="p-4 bg-black/20 backdrop-blur-md border-t border-white/5 mb-20 shrink-0">
+          <button className="w-full py-2.5 bg-white/5 hover:bg-white/10 text-white/40 rounded-lg text-xs flex items-center justify-center gap-2 transition-colors border border-white/5">
+            一键共享急救报告给医院 <ArrowRight className="w-3 h-3 opacity-50" />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const GuideView = () => {
+    const steps = [
+      { time: '0-10m', title: '初步处理', content: '保持冷静，轻轻清洗伤口，去除戒指、手表等束缚物。' },
+      { time: '10-30m', title: '制动等待', content: '使伤肢保持在心脏水平以下，尽量减少活动。' },
+      { time: '30m+', title: '专业救援', content: '如需自行就医，请确保有他人陪同；如在原地等待，请保持实时定位开启。请务必准备好向医生展示此 App 记录的风险评估数据。' },
+    ];
+
+    const toggleStep = (idx: number) => {
+      setCompletedSteps(prev => 
+        prev.includes(idx) ? prev.filter(i => i !== idx) : [...prev, idx]
+      );
+    };
+
+    return (
+      <div className="h-screen bg-[#1A1A1A] flex flex-col">
+        <div className="p-6 pt-12 flex items-center gap-4 shrink-0">
+          <button onClick={() => setView('MAIN')} className="text-white/60"><ChevronRight className="w-6 h-6 rotate-180" /></button>
+          <h2 className="text-xl font-bold text-white">急救步骤指引</h2>
+        </div>
+
+        <div className="flex-1 overflow-y-auto pb-32 px-6 space-y-6">
+          {steps.map((step, idx) => {
+            const isCompleted = completedSteps.includes(idx);
+            return (
+              <div 
+                key={idx} 
+                className={`p-6 rounded-3xl border transition-all duration-500 bg-gradient-to-br from-[#FF96F6]/10 to-[#83FF89]/10 ${
+                  isCompleted ? 'border-[#83FF89]/40' : 'border-white/20'
+                } hover:border-[#83FF89]/40`}
+              >
+                <div className="flex justify-between items-center mb-4">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-[#83FF89]">{step.time}</span>
+                  <button 
+                    onClick={() => toggleStep(idx)}
+                    className={`transition-colors duration-300 ${isCompleted ? 'text-[#83FF89]' : 'text-white/20'}`}
+                  >
+                    <CheckCircle2 className="w-6 h-6" />
+                  </button>
+                </div>
+                <h3 className="text-white font-bold text-lg mb-2">{step.title}</h3>
+                <p className="text-white/70 text-sm leading-relaxed">{step.content}</p>
+              </div>
+            );
+          })}
+
+          <div className="p-6 bg-red-500/10 border border-red-500/20 rounded-3xl">
+            <h4 className="text-red-400 font-bold text-xs uppercase tracking-widest mb-3 flex items-center gap-2">
+              <AlertTriangle className="w-3 h-3" />
+              禁忌事项
+            </h4>
+            <ul className="text-white/60 text-xs space-y-2 list-disc pl-4">
+              <li>切勿使用口吸出毒液</li>
+              <li>切勿使用止血带紧勒</li>
+              <li>切勿切开伤口或进行冰敷</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="max-w-md mx-auto h-screen shadow-2xl overflow-hidden font-sans selection:bg-[#83FF89] selection:text-black relative bg-black">
+      <AnimatePresence>
+        {view === 'SCAN' && <motion.div key="scan" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="h-full absolute inset-0"><ScanView /></motion.div>}
+        {view === 'MAIN' && <motion.div key="main" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="h-full pb-20 absolute inset-0"><MainView /></motion.div>}
+        {view === 'REPORT' && <motion.div key="report" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="h-full pb-20 absolute inset-0"><ReportView /></motion.div>}
+        {view === 'HOSPITALS' && <motion.div key="hospitals" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="h-full pb-20 absolute inset-0"><HospitalView /></motion.div>}
+        {view === 'GUIDE' && <motion.div key="guide" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="h-full pb-20 absolute inset-0"><GuideView /></motion.div>}
+      </AnimatePresence>
+
+      {/* High Risk Alert Modal */}
+      <AnimatePresence>
+        {showHighRiskModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] bg-red-600 flex flex-col items-center justify-center p-8 text-center"
+          >
+            <h2 className="text-4xl font-black text-white mb-12 leading-tight">
+              检测到局部肿胀加速
+            </h2>
+            
+            <div className="bg-red-800/60 p-8 rounded-[40px] border border-white/10 mb-20 w-full max-w-xs">
+              <p className="text-white text-xl font-bold mb-6">毒素扩散风险极高！</p>
+              <div className="bg-white rounded-2xl py-3 px-6 inline-block">
+                <p className="text-red-600 text-xl font-black">请立即保持静止</p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowHighRiskModal(false)}
+              className="w-full max-w-xs bg-white text-red-600 rounded-full py-6 text-2xl font-black shadow-2xl active:scale-95 transition-transform"
+            >
+              我已进入静止状态
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      
+      {view !== 'SCAN' && <BottomNav currentView={view} setView={setView} />}
+    </div>
+  );
+}
