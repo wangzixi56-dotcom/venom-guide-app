@@ -1,0 +1,16 @@
+/* 解决 Google AI Studio 预览回弹补丁 */
+html, body, #root {
+    height: 100% !important;
+    margin: 0 !important;
+    overflow: hidden !important; /* 锁死外部容器 */
+    background-color: #000000 !important; /* 强制背景为黑，防止切页闪白 */
+}
+
+/* 针对你的 App 主容器 */
+.min-h-screen {
+    height: 100vh !important;
+    overflow-y: auto !important; /* 开启内部滚动 */
+    -webkit-overflow-scrolling: touch;
+}
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
